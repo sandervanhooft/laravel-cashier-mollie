@@ -48,6 +48,33 @@ class SubscriptionTest extends BaseTestCase
     }
 
     /** @test */
+    public function canRetrieveLatestProcessedOrderItem()
+    {
+        /** @var Subscription $subscription */
+        $subscription = factory(Subscription::class)->create();
+
+        $this->assertNull($subscription->latestProcessedOrderItem());
+
+        $subscription->orderItems()->saveMany([
+            factory(OrderItem::class)->state('processed')->make([
+                'process_at' => '2018-11-18T00:00:00.000000Z',
+                'description' => 'not the latest processed order item',
+            ]),
+            factory(OrderItem::class)->state('processed')->make([
+                'process_at' => '2018-12-18T00:00:00.000000Z',
+                'description' => 'the latest processed order item',
+            ]),
+            factory(OrderItem::class)->state('unprocessed')->make([
+                'process_at' => '2018-12-18T00:00:00.000000Z',
+                'description' => 'the latest order item, but unprocessed',
+            ]),
+        ]);
+
+        $item = $subscription->latestProcessedOrderItem();
+        $this->assertEquals('the latest processed order item', $item->description);
+    }
+
+    /** @test */
     public function cannotScheduleNewOrderItemIfIdIsSet()
     {
         $this->expectException(LogicException::class);

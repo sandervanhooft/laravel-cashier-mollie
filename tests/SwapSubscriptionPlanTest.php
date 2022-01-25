@@ -177,6 +177,21 @@ class SwapSubscriptionPlanTest extends BaseTestCase
         });
     }
 
+    /** @test */
+    public function proratingUsesTheActuallyPaidAmountAndNotThePlanAmount()
+    {
+        $user = $this->getUserWithZeroBalance();
+        $subscription = $this->getSubscriptionForUser($user, [
+            "plan" => "monthly-10-1",
+        ]);
+
+        // get a subscription that was discounted on the most recent payment
+        $lastPaidItem = $subscription->latestProcessedOrderItem();
+
+        // swap it to another plan
+        // assert that the discounted price was credited
+    }
+
     protected function getUserWithZeroBalance()
     {
         $user = $this->getMandatedUser(true, [
@@ -191,17 +206,18 @@ class SwapSubscriptionPlanTest extends BaseTestCase
 
     /**
      * @param $user
+     * @param array $subscriptionOverrides
      * @return Subscription
      */
-    protected function getSubscriptionForUser($user)
+    protected function getSubscriptionForUser($user, array $subscriptionOverrides = [])
     {
-        return $user->subscriptions()->save(factory(Subscription::class)->make([
+        return $user->subscriptions()->save(factory(Subscription::class)->make(array_merge([
             "name" => "dummy name",
             "plan" => "monthly-10-1",
             "cycle_started_at" => now()->subWeeks(2),
             "cycle_ends_at" => now()->subWeeks(2)->addMonth(),
             "tax_percentage" => 10,
-        ]));
+        ])), $subscriptionOverrides);
     }
 
     protected function withMockedGetMollieCustomer($customerIds = ['cst_unique_customer_id'], $times = 1): void
