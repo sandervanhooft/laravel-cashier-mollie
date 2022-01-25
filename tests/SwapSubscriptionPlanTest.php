@@ -180,6 +180,7 @@ class SwapSubscriptionPlanTest extends BaseTestCase
     /** @test */
     public function proratingUsesTheAmountActuallyPaidForTheSubscriptionAndNotThePlanAmount()
     {
+        $this->markTestIncomplete('To be implemented');
         $user = $this->getUserWithZeroBalance();
 
         // get a subscription that was discounted on the most recent processed Order
