@@ -178,18 +178,44 @@ class SwapSubscriptionPlanTest extends BaseTestCase
     }
 
     /** @test */
-    public function proratingUsesTheActuallyPaidAmountAndNotThePlanAmount()
+    public function proratingUsesTheAmountActuallyPaidForTheSubscriptionAndNotThePlanAmount()
     {
         $user = $this->getUserWithZeroBalance();
+
+        // get a subscription that was discounted on the most recent processed Order
         $subscription = $this->getSubscriptionForUser($user, [
             "plan" => "monthly-10-1",
         ]);
 
-        // get a subscription that was discounted on the most recent payment
+        $subscription->orderItems()->saveMany([
+            factory(OrderItem::class)->state('processed')->make([
+                'process_at' => '2018-10-18T00:00:00.000000Z',
+                'description' => 'not the latest processed order item',
+                'unit_price' => 1000,
+            ]),
+            factory(OrderItem::class)->state('processed')->make([
+                'process_at' => '2018-11-18T00:00:00.000000Z',
+                'description' => 'the latest processed order item had a discount',
+                'unit_price' => 500,
+            ]),
+            factory(OrderItem::class)->state('unprocessed')->make([
+                'process_at' => '2018-12-18T00:00:00.000000Z',
+                'description' => 'the latest order item, but unprocessed',
+                'unit_price' => 1000,
+            ]),
+        ]);
+
         $lastPaidItem = $subscription->latestProcessedOrderItem();
 
         // swap it to another plan
-        // assert that the discounted price was credited
+        // assert that the discounted price was used for the proration calculation
+
+         //In essence:
+         //Get the latest paid Order for the Subscription.
+         //Then, take the unit_price of this specific Subscription's order item.
+         //MINUS any unit_prices of coupons applied to this specific Subscription in the same Order.
+         //(Coupons result in additional order items - use these)
+         //The resulting amount should be the input for the prorating
     }
 
     protected function getUserWithZeroBalance()

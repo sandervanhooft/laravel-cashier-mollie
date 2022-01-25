@@ -57,11 +57,11 @@ class SubscriptionTest extends BaseTestCase
 
         $subscription->orderItems()->saveMany([
             factory(OrderItem::class)->state('processed')->make([
-                'process_at' => '2018-11-18T00:00:00.000000Z',
+                'process_at' => '2018-10-18T00:00:00.000000Z',
                 'description' => 'not the latest processed order item',
             ]),
             factory(OrderItem::class)->state('processed')->make([
-                'process_at' => '2018-12-18T00:00:00.000000Z',
+                'process_at' => '2018-11-18T00:00:00.000000Z',
                 'description' => 'the latest processed order item',
             ]),
             factory(OrderItem::class)->state('unprocessed')->make([
