@@ -205,6 +205,7 @@ class Subscription extends Model implements InteractsWithOrderItems, Preprocesse
         $previousPlan = $this->plan;
 
         if ($this->cancelled()) {
+            // Undo cancellation
             $this->cycle_ends_at = $this->ends_at;
             $this->ends_at = null;
         }
