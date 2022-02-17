@@ -693,8 +693,21 @@ class Subscription extends Model implements InteractsWithOrderItems, Preprocesse
             return null;
         }
 
+
+        // Determine amount eligible to prorate
+        // The latest processed order item for previously paid amount
+        $latestProcessedOrderItem = $this->latestProcessedOrderItem();
+
+
+        $order = $latestProcessedOrderItem->order;
+        $orderItems = $order->items;
+        $appliedCoupons = $this->appliedCoupons;
+
+        // TODO proratableAmount: use previously applied coupons
+
         $plan = $this->plan();
-        $amount = $plan->amount()->negative()->multiply($this->getCycleLeftAttribute($now));
+        $proratableAmount = $plan->amount();
+        $amount = $proratableAmount->negative()->multiply($this->getCycleLeftAttribute($now));
 
         return $this->reimburse($amount, [ 'description' => $plan->description() ]);
     }
