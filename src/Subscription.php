@@ -682,6 +682,32 @@ class Subscription extends Model implements InteractsWithOrderItems, Preprocesse
         ], $overrides));
     }
 
+    protected function reimbursableAmount()
+    {
+        // Determine base amount eligible to reimburse
+        $latestProcessedOrderItem = $this->latestProcessedOrderItem();
+        $reimbursableAmount = $latestProcessedOrderItem->getTotal();
+
+        // Take any refunds into account
+        /** @var \Laravel\Cashier\Refunds\RefundItemCollection $refundItems */
+        $refundItems = RefundItem::where('original_order_item_id', $latestProcessedOrderItem->id)->get();
+        $reimbursableAmount = $reimbursableAmount->subtract($refundItems->getTotal());
+
+        // Take any applied coupons into account
+        $order = $latestProcessedOrderItem->order;
+        $orderItems = $order->items;
+        $appliedCoupons = $this->appliedCoupons; // TODO optimize retrieval
+
+        // TODO implement coupon: $reimbursableAmount -= $latestProcessedOrderItem->appliedCoupons->getTotal() (if only it was this simple ;) )
+
+        // Guard against a negative value
+        if ($reimbursableAmount->isNegative()) {
+            return $reimbursableAmount->multiply(0);
+        }
+
+        return $reimbursableAmount;
+    }
+
     /**
      * @param \Carbon\Carbon|null $now
      * @return null|\Laravel\Cashier\Order\OrderItem
@@ -689,27 +715,24 @@ class Subscription extends Model implements InteractsWithOrderItems, Preprocesse
     protected function reimburseUnusedTime(?Carbon $now = null)
     {
         $now = $now ?: now();
+
         if ($this->onTrial()) {
             return null;
         }
 
+        if (round($this->getCycleLeftAttribute($now), 3) == 1) {
+            return null;
+        }
 
-        // Determine amount eligible to prorate
-        // The latest processed order item for previously paid amount
-        $latestProcessedOrderItem = $this->latestProcessedOrderItem();
+        $amount = $this->reimbursableAmount()
+            ->negative()
+            ->multiply($this->getCycleLeftAttribute($now));
 
+        if ($amount->isZero()) {
+            return null;
+        }
 
-        $order = $latestProcessedOrderItem->order;
-        $orderItems = $order->items;
-        $appliedCoupons = $this->appliedCoupons;
-
-        // TODO proratableAmount: use previously applied coupons
-
-        $plan = $this->plan();
-        $proratableAmount = $plan->amount();
-        $amount = $proratableAmount->negative()->multiply($this->getCycleLeftAttribute($now));
-
-        return $this->reimburse($amount, [ 'description' => $plan->description() ]);
+        return $this->reimburse($amount, [ 'description' => $this->plan()->description() ]);
     }
 
     /**
