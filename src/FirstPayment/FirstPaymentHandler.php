@@ -40,7 +40,18 @@ class FirstPaymentHandler
      */
     public function execute()
     {
-        $order = DB::transaction(function () {
+        $dispatchMandateUpdated = false;
+
+        $order = DB::transaction(function () use (&$dispatchMandateUpdated) {
+            $localPayment = Cashier::$paymentModel::query()
+                ->where('mollie_payment_id', $this->molliePayment->id)
+                ->lockForUpdate()
+                ->first();
+
+            if ($localPayment?->order) {
+                return $localPayment->order;
+            }
+
             $this->owner->mollie_mandate_id = $this->molliePayment->mandateId;
             $this->owner->save();
 
@@ -53,7 +64,7 @@ class FirstPaymentHandler
 
             // It's possible a payment from Cashier v1 is not yet tracked in the Cashier database.
             // In that case we create a record here.
-            $localPayment = Cashier::$paymentModel::findByMolliePaymentOrCreate(
+            $localPayment = $localPayment ?: Cashier::$paymentModel::findByMolliePaymentOrCreate(
                 $this->molliePayment,
                 $this->owner,
                 $this->actions->all()
@@ -65,10 +76,14 @@ class FirstPaymentHandler
                 'mollie_mandate_id' => $this->molliePayment->mandateId,
             ]);
 
+            $dispatchMandateUpdated = true;
+
             return $order;
         });
 
-        event(new MandateUpdated($this->owner, $this->molliePayment));
+        if ($dispatchMandateUpdated) {
+            event(new MandateUpdated($this->owner, $this->molliePayment));
+        }
 
         return $order;
     }

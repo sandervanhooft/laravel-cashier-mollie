@@ -125,12 +125,87 @@ class FirstPaymentSubscriptionBuilderTest extends BaseTestCase
     }
 
     /** @test */
-    public function handlesAPaidFirstPayment()
+    public function testHandlesAPaidFirstPayment()
     {
-        $this->withoutExceptionHandling();
-
         Event::fake();
 
+        $molliePayment = $this->getPaidFirstPayment();
+
+        Cashier::$paymentModel::createFromMolliePayment($molliePayment, $this->user);
+
+        $this->withMockedGetMolliePayment(1, $molliePayment);
+        $this->withMockedGetMollieMandateAccepted(2);
+        $this->withMockedGetMollieCustomer(2);
+
+        $this->assertFalse($this->user->subscribed());
+        $this->assertNull($this->user->mollie_mandate_id);
+
+        $this->withMockedUpdateMolliePayment();
+
+        $response = $this->post(route('webhooks.mollie.first_payment', [
+            'id' => 'tr_unique_payment_id',
+        ]));
+
+        $response->assertStatus(200);
+
+        $this->user = $this->user->fresh();
+        $this->assertTrue($this->user->subscribed());
+        $this->assertTrue($this->user->onTrial());
+        $this->assertNotNull($this->user->mollie_mandate_id);
+
+        Event::assertDispatched(OrderProcessed::class);
+        Event::assertDispatched(FirstPaymentPaid::class);
+
+        $subscription = $this->user->subscription('default')->fresh();
+
+        Event::assertDispatched(SubscriptionStarted::class, function (SubscriptionStarted $e) use ($subscription) {
+            $this->assertTrue($e->subscription->is($subscription));
+
+            return true;
+        });
+        $this->assertSame(Order::first()->items->first()->description_extra_lines[0], 'From 2019-01-01 to 2019-02-01');
+    }
+
+    /** @test */
+    public function testIgnoresADuplicatePaidFirstPaymentWebhook()
+    {
+        Event::fake();
+
+        $molliePayment = $this->getPaidFirstPayment();
+
+        Cashier::$paymentModel::createFromMolliePayment($molliePayment, $this->user);
+
+        $this->withMockedGetMolliePayment(2, $molliePayment);
+        $this->withMockedGetMollieMandateAccepted(2);
+        $this->withMockedGetMollieCustomer(2);
+        $this->withMockedUpdateMolliePayment(2);
+
+        $firstResponse = $this->post(route('webhooks.mollie.first_payment', [
+            'id' => 'tr_unique_payment_id',
+        ]));
+
+        $secondResponse = $this->post(route('webhooks.mollie.first_payment', [
+            'id' => 'tr_unique_payment_id',
+        ]));
+
+        $firstResponse->assertStatus(200);
+        $secondResponse->assertStatus(200);
+
+        $this->assertSame(1, Order::count());
+        $this->assertSame(1, Order::query()->where('mollie_payment_id', 'tr_unique_payment_id')->count());
+        $this->assertSame(1, Cashier::$paymentModel::query()->count());
+        $this->assertNotNull(Cashier::$paymentModel::first()->order_id);
+
+        Event::assertDispatched(OrderProcessed::class, 1);
+        Event::assertDispatched(FirstPaymentPaid::class, 2);
+        Event::assertDispatched(SubscriptionStarted::class, 1);
+
+        restore_error_handler();
+        restore_exception_handler();
+    }
+
+    protected function getPaidFirstPayment(): MolliePayment
+    {
         $molliePayment = new MolliePayment(new MollieApiClient);
         $molliePayment->id = 'tr_unique_payment_id';
         $molliePayment->paidAt = Carbon::now()->toIso8601String();
@@ -171,40 +246,7 @@ class FirstPaymentSubscriptionBuilderTest extends BaseTestCase
             ],
         ]));
 
-        Cashier::$paymentModel::createFromMolliePayment($molliePayment, $this->user);
-
-        $this->withMockedGetMolliePayment(1, $molliePayment);
-        $this->withMockedGetMollieMandateAccepted(2);
-
-        $this->withMockedGetMollieCustomer(2);
-
-        $this->assertFalse($this->user->subscribed());
-        $this->assertNull($this->user->mollie_mandate_id);
-
-        $this->withMockedUpdateMolliePayment();
-
-        $response = $this->post(route('webhooks.mollie.first_payment', [
-            'id' => 'tr_unique_payment_id',
-        ]));
-
-        $response->assertStatus(200);
-
-        $this->user = $this->user->fresh();
-        $this->assertTrue($this->user->subscribed());
-        $this->assertTrue($this->user->onTrial());
-        $this->assertNotNull($this->user->mollie_mandate_id);
-
-        Event::assertDispatched(OrderProcessed::class);
-        Event::assertDispatched(FirstPaymentPaid::class);
-
-        $subscription = $this->user->subscription('default')->fresh();
-
-        Event::assertDispatched(SubscriptionStarted::class, function (SubscriptionStarted $e) use ($subscription) {
-            $this->assertTrue($e->subscription->is($subscription));
-
-            return true;
-        });
-        $this->assertSame(Order::first()->items->first()->description_extra_lines[0], 'From 2019-01-01 to 2019-02-01');
+        return $molliePayment;
     }
 
     /** @test */
