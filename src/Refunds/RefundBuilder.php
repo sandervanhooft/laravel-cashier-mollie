@@ -11,6 +11,7 @@ use Laravel\Cashier\Order\Order;
 use Laravel\Cashier\Order\OrderItem;
 use Laravel\Cashier\Order\OrderItemCollection;
 use LogicException;
+use Money\Money;
 use Mollie\Api\Types\PaymentStatus;
 
 class RefundBuilder
@@ -84,13 +85,34 @@ class RefundBuilder
         );
     }
 
+    /**
+     * The amount that will be charged back through Mollie. An order can be paid partly from
+     * the owner's credit balance, in which case only the amount that was actually charged
+     * (total_due) can be refunded through Mollie. The remainder is returned to the balance
+     * once Mollie confirms the refund.
+     */
+    public function getMollieRefundAmount(): Money
+    {
+        return Money::min($this->items->getTotal(), $this->order->getTotalDueRefundable());
+    }
+
     public function create(): Refund
     {
         $currency = $this->order->getCurrency();
+        $mollieRefundAmount = $this->getMollieRefundAmount();
+
+        throw_unless(
+            $mollieRefundAmount->isPositive(),
+            new LogicException(
+                'There is nothing left to refund through Mollie for order ' . $this->order->getKey() . '. ' .
+                'An order that was paid entirely using credit, or that was already fully refunded, ' .
+                'cannot be refunded through Mollie.'
+            )
+        );
 
         $mollieRefund = $this->createMollieRefund->execute($this->order->mollie_payment_id, [
             'amount' => [
-                'value' => money_to_decimal($this->items->getTotal()),
+                'value' => money_to_decimal($mollieRefundAmount),
                 'currency' => $currency,
             ],
         ]);
