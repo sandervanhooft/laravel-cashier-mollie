@@ -34,11 +34,12 @@ $order->refundCompletely();
 The refund still reverses the full order value, so the credit order and invoice cover the
 complete order.
 
-The credit is returned when Mollie reports the refund as processed, at the same moment the
-customer gets the charged amount back. A refund that ends up `failed` moves no credit at all, so
-a failed refund can never leave credit behind for a refund that did not happen. Successive
-partial refunds are handled the same way: the credit is returned once, by whichever refund first
-reverses more than was charged through Mollie.
+The credit is returned when a refund is processed. When a refund includes a Mollie amount, this
+happens after Mollie reports it as processed. A credit-only follow-up refund, after the Mollie
+amount has already been exhausted by an earlier refund, is processed immediately without another
+Mollie API call. A refund that ends up `failed` moves no credit at all, so a failed refund can never
+leave credit behind for a refund that did not happen. Successive partial refunds return credit once,
+as each processed refund reverses more than was charged through Mollie.
 
 An order that was paid entirely using credit, or that has already been refunded in full, has
 nothing left to charge back through Mollie and will throw a `LogicException`.

@@ -7,18 +7,21 @@ namespace Laravel\Cashier\Tests\Refunds;
 use Illuminate\Support\Facades\Event;
 use Laravel\Cashier\Cashier;
 use Laravel\Cashier\Events\RefundInitiated;
+use Laravel\Cashier\Events\RefundProcessed;
 use Laravel\Cashier\Mollie\Contracts\CreateMollieRefund;
 use Laravel\Cashier\Order\OrderItemCollection;
 use Laravel\Cashier\Refunds\RefundBuilder;
 use Laravel\Cashier\Refunds\RefundItem;
 use Laravel\Cashier\Tests\BaseTestCase;
 use Laravel\Cashier\Tests\Database\Factories\OrderItemFactory;
+use Laravel\Cashier\Tests\Fixtures\ThrowingRefundOrderItem;
 use LogicException;
-use RuntimeException;
 use Mollie\Api\MollieApiClient;
 use Mollie\Api\Resources\Refund as MollieRefund;
 use Mollie\Api\Types\RefundStatus as MollieRefundStatus;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Test;
+use RuntimeException;
 
 class RefundsBuilderTest extends BaseTestCase
 {
@@ -160,6 +163,184 @@ class RefundsBuilderTest extends BaseTestCase
     }
 
     #[Test]
+    public function completes_a_credit_only_follow_up_refund_without_calling_mollie_again(): void
+    {
+        Event::fake();
+
+        $this->mock(CreateMollieRefund::class, function (CreateMollieRefund $mock) {
+            $mollieRefund = new MollieRefund(new MollieApiClient);
+            $mollieRefund->id = 're_dummy_refund_id';
+            $mollieRefund->status = MollieRefundStatus::PENDING;
+            $mock->shouldReceive('execute')->with('tr_dummy_payment_id', [
+                'amount' => [
+                    'value' => '17.00',
+                    'currency' => 'EUR',
+                ],
+            ])->once()->andReturn($mollieRefund);
+        });
+
+        $user = $this->getUser();
+        $order = $this->createPaidOrderUsingCredit($user);
+        $orderItem = $order->items->first();
+
+        $firstRefund = RefundBuilder::forOrder($order)
+            ->addItemFromOrderItem($orderItem, [
+                'unit_price' => 2000,
+                'tax_percentage' => 0,
+                'quantity' => 1,
+            ])
+            ->create();
+
+        $firstRefund->handleProcessed();
+
+        $this->assertMoneyEURCents(2000, $order->refresh()->getAmountRefunded());
+        $this->assertEquals(300, $user->fresh()->credit('EUR')->value);
+
+        $creditBeforeSecondRefund = $user->fresh()->credit('EUR')->value;
+
+        $secondRefund = RefundBuilder::forOrder($order)
+            ->addItemFromOrderItem($orderItem, [
+                'unit_price' => 200,
+                'tax_percentage' => 0,
+                'quantity' => 1,
+            ])
+            ->create();
+
+        $this->assertStringStartsWith('local_', $secondRefund->mollie_refund_id);
+        $this->assertEquals(MollieRefundStatus::REFUNDED, $secondRefund->mollie_refund_status);
+        $this->assertMoneyEURCents(2200, $order->refresh()->getAmountRefunded());
+        $this->assertEquals(500, $user->fresh()->credit('EUR')->value);
+        $this->assertEquals(200, $user->fresh()->credit('EUR')->value - $creditBeforeSecondRefund);
+
+        Cashier::$refundModel::find($secondRefund->id)->handleProcessed();
+        Cashier::$refundModel::find($secondRefund->id)->handleProcessed();
+
+        $this->assertMoneyEURCents(2200, $order->refresh()->getAmountRefunded());
+        $this->assertEquals(500, $user->fresh()->credit('EUR')->value);
+        Event::assertDispatchedTimes(RefundInitiated::class, 2);
+        Event::assertDispatchedTimes(RefundProcessed::class, 2);
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessage('There is nothing left to refund through Mollie');
+
+        RefundBuilder::forOrder($order)
+            ->addItemFromOrderItem($orderItem, [
+                'unit_price' => 100,
+                'tax_percentage' => 0,
+                'quantity' => 1,
+            ])
+            ->create();
+    }
+
+    #[Test]
+    #[DataProvider('localRefundEventClasses')]
+    public function rolls_back_a_local_refund_when_an_event_listener_fails(string $eventClass): void
+    {
+        $user = $this->getUser();
+        [$order, $orderItem] = $this->createOrderWithPartiallyProcessedRefund($user);
+        $builder = $this->creditOnlyFollowUpBuilder($order, $orderItem);
+        $shouldThrow = true;
+
+        Event::listen($eventClass, function () use (&$shouldThrow) {
+            if ($shouldThrow) {
+                $shouldThrow = false;
+
+                throw new RuntimeException('Local refund event listener failed.');
+            }
+        });
+
+        try {
+            $builder->create();
+            $this->fail('The event listener exception was not thrown.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Local refund event listener failed.', $exception->getMessage());
+        }
+
+        $this->assertSame(1, Cashier::$refundModel::count());
+        $this->assertSame(2, Cashier::$orderModel::count());
+        $this->assertMoneyEURCents(2000, $order->refresh()->getAmountRefunded());
+        $this->assertSame(300, $user->fresh()->credit('EUR')->value);
+
+        $refund = $builder->create();
+
+        $this->assertEquals(MollieRefundStatus::REFUNDED, $refund->mollie_refund_status);
+        $this->assertSame(2, Cashier::$refundModel::count());
+        $this->assertMoneyEURCents(2200, $order->refresh()->getAmountRefunded());
+        $this->assertSame(500, $user->fresh()->credit('EUR')->value);
+    }
+
+    public static function localRefundEventClasses(): iterable
+    {
+        yield 'initiated event' => [RefundInitiated::class];
+        yield 'processed event' => [RefundProcessed::class];
+    }
+
+    #[Test]
+    public function rolls_back_a_local_refund_when_an_item_hook_fails(): void
+    {
+        $originalOrderItemModel = Cashier::$orderItemModel;
+        Cashier::useOrderItemModel(ThrowingRefundOrderItem::class);
+
+        try {
+            $user = $this->getUser();
+            [$order, $orderItem] = $this->createOrderWithPartiallyProcessedRefund($user);
+            $builder = $this->creditOnlyFollowUpBuilder($order, $orderItem);
+            ThrowingRefundOrderItem::$throwOnRefund = true;
+
+            try {
+                $builder->create();
+                $this->fail('The item hook exception was not thrown.');
+            } catch (RuntimeException $exception) {
+                $this->assertSame('Refund item hook failed.', $exception->getMessage());
+            }
+
+            $this->assertSame(1, Cashier::$refundModel::count());
+            $this->assertSame(2, Cashier::$orderModel::count());
+            $this->assertMoneyEURCents(2000, $order->refresh()->getAmountRefunded());
+            $this->assertSame(300, $user->fresh()->credit('EUR')->value);
+
+            ThrowingRefundOrderItem::$throwOnRefund = false;
+            $refund = $builder->create();
+
+            $this->assertEquals(MollieRefundStatus::REFUNDED, $refund->mollie_refund_status);
+            $this->assertSame(2, Cashier::$refundModel::count());
+            $this->assertMoneyEURCents(2200, $order->refresh()->getAmountRefunded());
+            $this->assertSame(500, $user->fresh()->credit('EUR')->value);
+        } finally {
+            ThrowingRefundOrderItem::$throwOnRefund = false;
+            Cashier::useOrderItemModel($originalOrderItemModel);
+        }
+    }
+
+    #[Test]
+    public function rejects_a_stale_competing_builder_after_the_remaining_credit_is_refunded(): void
+    {
+        Event::fake();
+
+        $user = $this->getUser();
+        [$order, $orderItem] = $this->createOrderWithPartiallyProcessedRefund($user);
+        $firstBuilder = $this->creditOnlyFollowUpBuilder($order, $orderItem);
+        $staleCompetingBuilder = $this->creditOnlyFollowUpBuilder(
+            Cashier::$orderModel::findOrFail($order->id),
+            $orderItem
+        );
+
+        $firstBuilder->create();
+
+        try {
+            $staleCompetingBuilder->create();
+            $this->fail('The stale competing builder was not rejected.');
+        } catch (LogicException $exception) {
+            $this->assertStringContainsString('There is nothing left to refund through Mollie', $exception->getMessage());
+        }
+
+        $this->assertSame(2, Cashier::$refundModel::count());
+        $this->assertSame(3, Cashier::$orderModel::count());
+        $this->assertMoneyEURCents(2200, $order->refresh()->getAmountRefunded());
+        $this->assertSame(500, $user->fresh()->credit('EUR')->value);
+    }
+
+    #[Test]
     public function cannot_refund_an_order_that_was_paid_entirely_with_credit(): void
     {
         Event::fake();
@@ -244,5 +425,41 @@ class RefundsBuilderTest extends BaseTestCase
         ]);
 
         return $order;
+    }
+
+    protected function createOrderWithPartiallyProcessedRefund($user): array
+    {
+        $this->mock(CreateMollieRefund::class, function (CreateMollieRefund $mock) {
+            $mollieRefund = new MollieRefund(new MollieApiClient);
+            $mollieRefund->id = 're_dummy_refund_id';
+            $mollieRefund->status = MollieRefundStatus::PENDING;
+            $mock->shouldReceive('execute')->once()->andReturn($mollieRefund);
+        });
+
+        $order = $this->createPaidOrderUsingCredit($user);
+        $orderItem = $order->items->first();
+
+        RefundBuilder::forOrder($order)
+            ->addItemFromOrderItem($orderItem, [
+                'unit_price' => 2000,
+                'tax_percentage' => 0,
+                'quantity' => 1,
+            ])
+            ->create()
+            ->handleProcessed();
+
+        $order->refresh();
+
+        return [$order, $orderItem];
+    }
+
+    protected function creditOnlyFollowUpBuilder($order, $orderItem): RefundBuilder
+    {
+        return RefundBuilder::forOrder($order)
+            ->addItemFromOrderItem($orderItem, [
+                'unit_price' => 200,
+                'tax_percentage' => 0,
+                'quantity' => 1,
+            ]);
     }
 }
