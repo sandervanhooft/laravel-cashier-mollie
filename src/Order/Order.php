@@ -636,6 +636,46 @@ class Order extends Model
     }
 
     /**
+     * Refunds are settled against the Mollie payment first and against the credit used last:
+     * only what was actually charged can be handed back through Mollie.
+     *
+     * The part of the Mollie payment that has been refunded so far.
+     *
+     * @return \Money\Money
+     */
+    public function getTotalDueRefunded()
+    {
+        return Money::min($this->getAmountRefunded(), $this->getTotalDue());
+    }
+
+    /**
+     * The part of the Mollie payment that can still be refunded.
+     *
+     * @return \Money\Money
+     */
+    public function getTotalDueRefundable()
+    {
+        return $this->getTotalDue()->subtract($this->getTotalDueRefunded());
+    }
+
+    /**
+     * The part of the credit used for this order that has been returned to the owner's
+     * balance by refunds so far.
+     *
+     * @return \Money\Money
+     */
+    public function getCreditUsedRestored()
+    {
+        $refundedBeyondPayment = $this->getAmountRefunded()->subtract($this->getTotalDue());
+
+        if (! $refundedBeyondPayment->isPositive()) {
+            return $this->toMoney(0);
+        }
+
+        return Money::min($this->getCreditUsed(), $refundedBeyondPayment);
+    }
+
+    /**
      * @return \Money\Money
      */
     public function getAmountChargedBack()
