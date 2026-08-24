@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Laravel\Cashier\Refunds;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Laravel\Cashier\Cashier;
 use Laravel\Cashier\Events\RefundInitiated;
@@ -105,22 +106,31 @@ class RefundBuilder
         $mollieRefundAmount = $this->getMollieRefundAmount();
 
         if (! $mollieRefundAmount->isPositive()) {
-            throw_unless(
-                $this->isCreditOnlyFollowUp($refundAmount),
-                new LogicException(
-                    'There is nothing left to refund through Mollie for order ' . $this->order->getKey() . '. ' .
-                    'An order that was paid entirely using credit, or that was already fully refunded, ' .
-                    'cannot be refunded through Mollie.'
-                )
-            );
+            return DB::transaction(function () use ($refundAmount) {
+                $this->order = Cashier::$orderModel::whereKey($this->order->getKey())
+                    ->lockForUpdate()
+                    ->firstOrFail();
 
-            $refundRecord = $this->createRefundRecord(
-                'local_' . Str::uuid(),
-                RefundStatus::PENDING,
-                $currency
-            );
+                throw_unless(
+                    $this->isCreditOnlyFollowUp($refundAmount),
+                    new LogicException(
+                        'There is nothing left to refund through Mollie for order ' . $this->order->getKey() . '. ' .
+                        'An order that was paid entirely using credit, or that was already fully refunded, ' .
+                        'cannot be refunded through Mollie.'
+                    )
+                );
 
-            return $refundRecord->handleProcessed();
+                $refundRecord = $this->createRefundRecord(
+                    'local_' . Str::uuid(),
+                    RefundStatus::PENDING,
+                    $this->order->getCurrency(),
+                    new RefundItemCollection(
+                        $this->items->map(fn (RefundItem $item) => $item->replicate())->all()
+                    )
+                );
+
+                return $refundRecord->handleProcessed();
+            });
         }
 
         $mollieRefund = $this->createMollieRefund->execute($this->order->mollie_payment_id, [
@@ -144,7 +154,12 @@ class RefundBuilder
             && $refundAmount->lessThanOrEqual($amountRefundable);
     }
 
-    protected function createRefundRecord(string $mollieRefundId, string $status, string $currency): Refund
+    protected function createRefundRecord(
+        string $mollieRefundId,
+        string $status,
+        string $currency,
+        ?RefundItemCollection $items = null
+    ): Refund
     {
         $refundRecord = Cashier::$refundModel::create([
             'owner_type' => $this->order->owner_type,
@@ -156,7 +171,7 @@ class RefundBuilder
             'mollie_refund_status' => $status,
         ]);
 
-        $refundRecord->items()->saveMany($this->items);
+        $refundRecord->items()->saveMany($items ?? $this->items);
 
         event(new RefundInitiated($refundRecord));
 
