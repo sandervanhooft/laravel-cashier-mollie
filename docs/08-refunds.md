@@ -41,6 +41,12 @@ Mollie API call. A refund that ends up `failed` moves no credit at all, so a fai
 leave credit behind for a refund that did not happen. Successive partial refunds return credit once,
 as each processed refund reverses more than was charged through Mollie.
 
+A refund can never reverse more order value than the order has left, however it is funded: the
+refund items must total at most `total - amount_refunded`. Reversing more would push
+`amount_refunded` past the order total and generate credit orders worth more than the original
+order, so it throws a `LogicException`. On an order that has been partially refunded already,
+build a refund for the remaining items rather than calling `refundCompletely()`.
+
 An order that was paid entirely using credit, or that has already been refunded in full, has
 nothing left to charge back through Mollie and will throw a `LogicException`.
 

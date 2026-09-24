@@ -659,6 +659,19 @@ class Order extends Model
     }
 
     /**
+     * The part of the order value that has not been refunded yet. No refund may reverse
+     * more than this, however it was funded.
+     *
+     * @return \Money\Money
+     */
+    public function getTotalRefundable()
+    {
+        $refundable = $this->getTotal()->subtract($this->getAmountRefunded());
+
+        return $refundable->isPositive() ? $refundable : $this->toMoney(0);
+    }
+
+    /**
      * The part of the credit used for this order that has been returned to the owner's
      * balance by refunds so far.
      *

@@ -135,31 +135,97 @@ class RefundsBuilderTest extends BaseTestCase
     }
 
     #[Test]
-    public function caps_a_partial_refund_at_the_amount_still_refundable_through_mollie(): void
+    public function caps_a_follow_up_refund_for_the_remaining_order_value_at_what_mollie_can_still_refund(): void
     {
         Event::fake();
 
-        // EUR 10.00 of the EUR 17.00 charged has already been refunded, so this refund of
-        // EUR 22.00 worth of items can only charge back the remaining EUR 7.00.
+        // EUR 10.00 has already been refunded and processed. Reversing the remaining
+        // EUR 12.00 can only charge back the EUR 7.00 left of the EUR 17.00 payment; the
+        // other EUR 5.00 was paid from credit and goes back to the balance.
         $this->mock(CreateMollieRefund::class, function (CreateMollieRefund $mock) {
-            $mollieRefund = new MollieRefund(new MollieApiClient);
-            $mollieRefund->id = 're_dummy_refund_id';
-            $mollieRefund->status = MollieRefundStatus::PENDING;
             $mock->shouldReceive('execute')->with('tr_dummy_payment_id', [
                 'amount' => [
                     'value' => '7.00',
                     'currency' => 'EUR',
                 ],
-            ])->once()->andReturn($mollieRefund);
+            ])->once()->andReturnUsing(function () {
+                $mollieRefund = new MollieRefund(new MollieApiClient);
+                $mollieRefund->id = 're_dummy_refund_id';
+                $mollieRefund->status = MollieRefundStatus::PENDING;
+
+                return $mollieRefund;
+            });
         });
 
         $user = $this->getUser();
         $order = $this->createPaidOrderUsingCredit($user);
+        $orderItem = $order->items->first();
         $order->update(['amount_refunded' => 1000]);
 
-        RefundBuilder::forWholeOrder($order)->create();
-
         $this->assertMoneyEURCents(700, $order->getTotalDueRefundable());
+        $this->assertMoneyEURCents(1200, $order->getTotalRefundable());
+
+        RefundBuilder::forOrder($order)
+            ->addItemFromOrderItem($orderItem, [
+                'unit_price' => 1200,
+                'tax_percentage' => 0,
+                'quantity' => 1,
+            ])
+            ->create()
+            ->handleProcessed();
+
+        // The order is now fully reversed - no more, no less - and the credit is back.
+        $this->assertMoneyEURCents(2200, $order->refresh()->getAmountRefunded());
+        $this->assertMoneyEURCents(0, $order->getTotalRefundable());
+        $this->assertEquals(500, $user->fresh()->credit('EUR')->value);
+    }
+
+    #[Test]
+    public function rejects_a_refund_that_reverses_more_than_the_order_has_left(): void
+    {
+        Event::fake();
+
+        // Mollie would accept a further EUR 7.00, so the Mollie amount alone does not
+        // catch this. Recording EUR 22.00 of items against an order with EUR 12.00 left
+        // would push amount_refunded to EUR 32.00 on a EUR 22.00 order.
+        $this->mock(CreateMollieRefund::class, function (CreateMollieRefund $mock) {
+            $mock->shouldReceive('execute')->once()->andReturnUsing(function () {
+                $mollieRefund = new MollieRefund(new MollieApiClient);
+                $mollieRefund->id = 're_dummy_refund_id';
+                $mollieRefund->status = MollieRefundStatus::PENDING;
+
+                return $mollieRefund;
+            });
+        });
+
+        $user = $this->getUser();
+        $order = $this->createPaidOrderUsingCredit($user);
+        $orderItem = $order->items->first();
+
+        RefundBuilder::forOrder($order)
+            ->addItemFromOrderItem($orderItem, [
+                'unit_price' => 1000,
+                'tax_percentage' => 0,
+                'quantity' => 1,
+            ])
+            ->create()
+            ->handleProcessed();
+
+        $this->assertMoneyEURCents(1000, $order->refresh()->getAmountRefunded());
+
+        try {
+            $order->refundCompletely();
+            $this->fail('Refunding more than the order has left was not rejected.');
+        } catch (LogicException $exception) {
+            $this->assertStringContainsString(
+                'only 12.00 EUR of the order value is still refundable',
+                $exception->getMessage()
+            );
+        }
+
+        // Nothing was recorded, so the bookkeeping cannot exceed the order value.
+        $this->assertMoneyEURCents(1000, $order->refresh()->getAmountRefunded());
+        $this->assertSame(1, Cashier::$refundModel::count());
     }
 
     #[Test]
@@ -221,7 +287,7 @@ class RefundsBuilderTest extends BaseTestCase
         Event::assertDispatchedTimes(RefundProcessed::class, 2);
 
         $this->expectException(LogicException::class);
-        $this->expectExceptionMessage('There is nothing left to refund through Mollie');
+        $this->expectExceptionMessage('only 0.00 EUR of the order value is still refundable');
 
         RefundBuilder::forOrder($order)
             ->addItemFromOrderItem($orderItem, [

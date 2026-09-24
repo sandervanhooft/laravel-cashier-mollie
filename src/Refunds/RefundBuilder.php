@@ -105,6 +105,11 @@ class RefundBuilder
         $refundAmount = $this->items->getTotal();
         $mollieRefundAmount = $this->getMollieRefundAmount();
 
+        // A refund reverses order value, so it can never reverse more than the order has
+        // left. Capping only the Mollie amount would still record the full item total
+        // against the order, inflating amount_refunded and the credit orders built from it.
+        $this->guardDoesNotExceedRemainingOrderValue($refundAmount, $currency);
+
         if (! $mollieRefundAmount->isPositive()) {
             return DB::transaction(function () use ($refundAmount) {
                 $this->order = Cashier::$orderModel::whereKey($this->order->getKey())
@@ -143,12 +148,25 @@ class RefundBuilder
         return $this->createRefundRecord($mollieRefund->id, $mollieRefund->status, $currency);
     }
 
+    protected function guardDoesNotExceedRemainingOrderValue(Money $refundAmount, string $currency): void
+    {
+        $refundable = $this->order->getTotalRefundable();
+
+        throw_unless(
+            $refundAmount->lessThanOrEqual($refundable),
+            new LogicException(
+                'Cannot refund ' . money_to_decimal($refundAmount) . ' ' . $currency .
+                ' for order ' . $this->order->getKey() . ': only ' . money_to_decimal($refundable) .
+                ' ' . $currency . ' of the order value is still refundable.'
+            )
+        );
+    }
+
     protected function isCreditOnlyFollowUp(Money $refundAmount): bool
     {
-        $amountRefunded = $this->order->getAmountRefunded();
-        $amountRefundable = $this->order->getTotal()->subtract($amountRefunded);
+        $amountRefundable = $this->order->getTotalRefundable();
 
-        return $amountRefunded->isPositive()
+        return $this->order->getAmountRefunded()->isPositive()
             && $refundAmount->isPositive()
             && $amountRefundable->isPositive()
             && $refundAmount->lessThanOrEqual($amountRefundable);
